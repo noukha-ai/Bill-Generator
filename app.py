@@ -28,23 +28,31 @@ class BillOCRParser:
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel('gemini-2.0-flash')
 
-    def calculate_legitimacy_score(self, data: Dict[str, Any], image: Image.Image) -> int:
+    def calculate_legitimacy_score(self, data: Dict[str, Any], image: Image.Image) -> Dict[str, Any]:
         score = 100
+        reasons = []
+
         # Penalize for missing fields
         for field in ['Bill No', 'Date', 'Total Amount']:
             if not data.get(field):
                 score -= 20
+                reasons.append(f"Missing field: {field}")
 
         # Penalize if handwritten
         if data.get("IsHandwritten") == True:
             score -= 30
+            reasons.append("Handwritten content detected")
 
         # Penalize for small or blurry images (rough estimate)
         width, height = image.size
         if width < 500 or height < 500:
             score -= 10
+            reasons.append("Image resolution is too low (below 500x500)")
 
-        return max(0, min(score, 100))
+        return {
+            "score": max(0, min(score, 100)),
+            "reasons": reasons
+        }
 
     def extract_bill_data(self, image: Image.Image) -> Dict[str, Any]:
         prompt = """
@@ -68,8 +76,9 @@ Return JSON only.
                 json_content = response_text[json_start:json_end]
                 try:
                     bill_data = json.loads(json_content)
-                    score = self.calculate_legitimacy_score(bill_data, image)
-                    bill_data["legitimacy_score"] = score
+                    legitimacy = self.calculate_legitimacy_score(bill_data, image)
+                    bill_data["legitimacy_score"] = legitimacy["score"]
+                    bill_data["legitimacy_reasons"] = legitimacy["reasons"]
                     return bill_data
                 except json.JSONDecodeError:
                     return {"error": "Failed to parse JSON", "raw_response": response_text}
