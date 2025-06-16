@@ -8,9 +8,11 @@ from pathlib import Path
 from PIL import Image
 import google.generativeai as genai
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from dotenv import load_dotenv
 load_dotenv()
 
+# Logging setup
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -28,44 +30,38 @@ class BillOCRParser:
         genai.configure(api_key=self.api_key)
         self.model = genai.GenerativeModel('gemini-2.0-flash')
 
-    def calculate_legitimacy_score(self, data: Dict[str, Any], image: Image.Image) -> Dict[str, Any]:
-        score = 100
-        reasons = []
-
-        # Penalize for missing fields
-        for field in ['Bill No', 'Date', 'Total Amount']:
-            if not data.get(field):
-                score -= 20
-                reasons.append(f"Missing field: {field}")
-
-        # Penalize if handwritten
-        if data.get("IsHandwritten") == True:
-            score -= 30
-            reasons.append("Handwritten content detected")
-
-        # Penalize for small or blurry images (rough estimate)
-        width, height = image.size
-        if width < 500 or height < 500:
-            score -= 10
-            reasons.append("Image resolution is too low (below 500x500)")
-
-        return {
-            "score": max(0, min(score, 100)),
-            "reasons": reasons
-        }
-
     def extract_bill_data(self, image: Image.Image) -> Dict[str, Any]:
         prompt = """
-You are analyzing a bill image.
-Extract the following fields in JSON:
-- Bill No
-- Date
-- Total Amount
-- IsHandwritten: true if the bill is handwritten, otherwise false.
+You are an AI assistant analyzing a bill image.
 
-If a field is missing, set it to null.
-If handwriting is detected in any main field (Bill No, Date, Total), IsHandwritten = true.
-Return JSON only.
+Your tasks:
+1. Extract the following fields in JSON format:
+   - Bill No
+   - Date
+   - Total Amount
+   - IsHandwritten: true if the bill appears handwritten, otherwise false
+
+2. Based on the extracted data and the quality of the image:
+   - Calculate a legitimacy_score from 0 to 100
+   - Give reasons for the score in a list called legitimacy_reasons
+
+Scoring rules:
+- Start with 100.
+- Subtract 20 points for each missing key field (Bill No, Date, Total Amount).
+- Subtract 30 points if the bill is handwritten.
+- Subtract 10 points if the image resolution appears to be low (less than 500x500 pixels).
+
+Example output:
+{
+  "Bill No": "12345",
+  "Date": "2024-05-01",
+  "Total Amount": "Rs. 1245.00",
+  "IsHandwritten": false,
+  "legitimacy_score": 90,
+  "legitimacy_reasons": ["Missing field: Date", "Image resolution is too low"]
+}
+
+Respond only with JSON.
         """
         try:
             response = self.model.generate_content([prompt, image])
@@ -75,11 +71,7 @@ Return JSON only.
             if json_start >= 0 and json_end > json_start:
                 json_content = response_text[json_start:json_end]
                 try:
-                    bill_data = json.loads(json_content)
-                    legitimacy = self.calculate_legitimacy_score(bill_data, image)
-                    bill_data["legitimacy_score"] = legitimacy["score"]
-                    bill_data["legitimacy_reasons"] = legitimacy["reasons"]
-                    return bill_data
+                    return json.loads(json_content)
                 except json.JSONDecodeError:
                     return {"error": "Failed to parse JSON", "raw_response": response_text}
             else:
@@ -89,6 +81,13 @@ Return JSON only.
 
 # Flask App
 app = Flask(__name__)
+CORS(app, resources={
+    r"/*": {
+        "origins": ["http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"]
+    }
+})
 parser = None
 
 def get_parser():
